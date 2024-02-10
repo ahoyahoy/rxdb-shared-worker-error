@@ -3,15 +3,42 @@ import './style.css';
 import { createApp } from 'vue';
 
 import { createRxDatabase } from 'rxdb';
-import {
-  getRxStorageSharedWorker,
-  getRxStorageWorker,
-} from 'rxdb-premium/plugins/storage-worker';
+import { getRxStorageWorker } from 'rxdb-premium/plugins/storage-worker';
 
 import App from './App.vue';
 import IdbWorkerUrl from './shared-worker?url&worker';
 
 createApp(App).mount('#app')
+
+const schema = {
+        "id": "xyz",
+        "name": "xyz",
+        "type": "object",
+        "primaryKey": "id",
+        "version": 0,
+        "encrypted": [
+            "d"
+        ],
+        "properties": {
+            "id": {
+                "type": "string",
+                "maxLength": 100
+            },
+            "d": {
+                "type": "object"
+            },
+            "updatedAt": {
+                "type": "string"
+            },
+            "meta": {
+                "type": "object"
+            }
+        }
+    }
+
+
+const okText = "export function onQueryChange(newQuery, changes) {\r\n    let reeval = false\r\n    const watchedKeys = ['nextOperationId', 'conditions', 'guardFunction']\r\n    changes.forEach(ch => {\r\n        if (ch.path.length === 0) {\r\n            reeval = true\r\n        }\r\n        else if (ch.path.some(e => watchedKeys.includes(e))) {\r\n            reeval = true\r\n        }\r\n    })\r\n\r\n    console.log('ggghh', changes, reeval)\r\n    if (reeval) {\r\n        this.elk = this.getElkData(this.query)\r\n    }\r\n}\r\n\r\nexport function getElkData(q) {\r\n    const query = JSON.parse(JSON.stringify({\r\n        operations: q.operations,\r\n        start: q.start\r\n    }))\r\n    const startOperations = getStartOperations(query)\r\n    const conditionLabels = getConditionLabelsOperations(query.operations)\r\n    const operations = [...startOperations, ...query.operations, ...conditionLabels]\r\n    // hashmap \r\n    const operationsMap = new Map(operations.map(op => [op.id, op]))\r\n    const groupedIds = this.getGroups(operations.map(o => o.id), operationsMap)\r\n\r\n    console.log('GGGGGG', groupedIds, operationsMap)\r\n\r\n    const data = groupedIds.map(idsChain => this.getElkConfig(idsChain, operationsMap))\r\n\r\n    return data\r\n}\r\n\r\n\r\nexport function getGroups(allIds, operationsMap) {\r\n    const edges = getEdges(allIds, operationsMap)\r\n    const grouped = this.$utils.tree.groupEdges(edges.map(([a, b]) => [a, b]))\r\n    const flattened = grouped.flat()\r\n    const noEdges = allIds.filter(id =>\r\n        !flattened.includes(id)\r\n    )\r\n    noEdges.forEach(id => {\r\n        grouped.push([id])\r\n    })\r\n\r\n    this.groups = grouped\r\n\r\n    return grouped\r\n}\r\n\r\nexport function getElkConfig(idsChain, operationsMap) {\r\n    console.time('ELK')\r\n\r\n    const operationsPartitions = getPartitions(idsChain, operationsMap) // add \"depth\" to each id... used for elk 'partition' which divide graph into rows/cols\r\n    this.partitions = operationsPartitions\r\n    const ports = getPorts(idsChain, operationsMap)\r\n    console.log('elk ports', ports)\r\n\r\n    const operationsByNextOperation = Array.from(operationsMap.values())\r\n        .reduce<Record<string, any>>((acc, op) => ({\r\n            ...acc,\r\n            ...(op.nextOperationId && { [op.nextOperationId]: op })\r\n        }), {})\r\n\r\n    const nodes = getNodes(idsChain, operationsMap, operationsPartitions, ports, operationsByNextOperation)\r\n\r\n    const operationsEdges = getEdges(idsChain, operationsMap)\r\n    const edges = makeEdges(operationsEdges, nodes)\r\n\r\n    const elkconf = {\r\n        id: 'chain_' + operationsMap.get(idsChain[0]).id,\r\n        timestamp: Date.now(),\r\n        layoutOptions: {\r\n            'elk.algorithm': 'layered',\r\n            \"fixedAlignment\": \"BALANCED\",\r\n            // 'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',\r\n            // \"alignment\": \"CENTER\",\r\n            // \"edgeRouting\": \"ORTHOGONAL\",\r\n            // 'contentAlignment': '[H_CENTER]',\r\n            // \"crossingMinimization.strategy\": \"INTERACTIVE\",\r\n            // \"hierarchyHandling\": \"SEPARATE_CHILDREN\",\r\n            // \"layering.layerConstraint\": \"FIRST\"\r\n            'elk.partitioning.activate': 'true',\r\n            'elk.direction': 'DOWN',\r\n            'elk.layered.spacing.edgeEdgeBetweenLayers': '10', //\r\n            'elk.layered.spacing.edgeNodeBetweenLayers': '30', // The horizontal padding (in pixels) of an ELK link.\r\n            'elk.layered.spacing.nodeNodeBetweenLayers': '50', // The horizontal padding (in pixels) of an ELK node.\r\n            'elk.padding': '[top=0,left=0,bottom=0,right=0]',\r\n            'elk.spacing.edgeNode': '30', // The vertical padding (in pixels) of an ELK link.\r\n            'elk.spacing.edgeEdge': '40', //\r\n            'elk.spacing.nodeNode': '20', // The vertical padding (in pixels) of an ELK node.\r\n            'elk.spacing.portPort': '40', // The space (in pixels) between two ports, the space is also created on the outermost ports which might cause node height extension.\r\n            // 'spacing.componentComponent': 100,\r\n        },\r\n        children: nodes,\r\n        edges,\r\n    }\r\n\r\n    console.timeEnd('ELK')\r\n    console.log('elk', elkconf)\r\n\r\n    return elkconf\r\n}\r\n\r\n\r\nfunction getStartOperations(query) {\r\n    const queryState = query\r\n    const hasStart = queryState.start\r\n\r\n    const startOperations = []\r\n\r\n    console.log('getStartOperations', queryState)\r\n\r\n    if (queryState.start && Object.keys(queryState.start).length) {\r\n        console.log('start1')\r\n        Object.entries(queryState.start).forEach(([key, nextOperationId]) => {\r\n            startOperations.push({\r\n                id: '_start_op_' + key,\r\n                type: 'start',\r\n                nextOperationId,\r\n            })\r\n        })\r\n    }\r\n    else if (queryState.operations.length) {\r\n        console.log('start2')\r\n        const firstOp = queryState.operations[0]\r\n        startOperations.push({\r\n            id: '_start_op_',\r\n            type: 'start',\r\n            nextOperationId: firstOp.id,\r\n        })\r\n    }\r\n    else {\r\n        console.log('start3')\r\n        startOperations.push({\r\n            id: '_start_op_',\r\n            type: 'start',\r\n            nextOperationId: ''\r\n        })\r\n    }\r\n\r\n    console.log('startx', startOperations)\r\n\r\n\r\n    return startOperations\r\n\r\n}\r\n\r\n\r\nfunction getPartitions(idsChain, operationsMap) {\r\n    const partitions = {}\r\n    const operations = idsChain.map((id) => operationsMap.get(id))\r\n\r\n    // Helper function for depth-first search to calculate partitions\r\n    function calculatePartition(node, depth) {\r\n        if (partitions[node.id] === undefined || partitions[node.id] < depth) {\r\n            partitions[node.id] = depth\r\n\r\n            if (node.type === 'condition') {\r\n                let conds = node.conditionsType === 'switch' ? node.conditions[0].cases : node.conditions\r\n                conds.forEach(condition => {\r\n                    if (condition.operationId) {\r\n                        const nextNode = operations.find(op => op.id === condition.operationId)\r\n                        calculatePartition(nextNode, depth + 2) // 2 because we inject labels\r\n                    }\r\n                })\r\n            } else if (node.nextOperationId) {\r\n                const nextNode = operations.find(op => op.id === node.nextOperationId)\r\n                calculatePartition(nextNode, depth + 1)\r\n            }\r\n        }\r\n    }\r\n\r\n    // Iterate through all operations and calculate partitions\r\n    operations.forEach(operation => {\r\n        if (partitions[operation.id] === undefined) {\r\n            calculatePartition(operation, 0)\r\n        }\r\n    })\r\n\r\n    return partitions\r\n}\r\n\r\nfunction getPorts(idsChain, operationsMap) {\r\n    const ports = {}\r\n    const operations = idsChain.map((id) => operationsMap.get(id))\r\n\r\n    operations.forEach(node => {\r\n        ports[node.id] = []\r\n\r\n        if (node.type === 'condition') {\r\n            let conds = node.conditionsType === 'switch' ? node.conditions[0].cases : node.conditions\r\n            conds.forEach((condition, condIndex) => {\r\n                if (condition.operationId) {\r\n                    ports[node.id].push(makePort(node.id, 'output', conds.length - condIndex, condIndex))\r\n                }\r\n            })\r\n        }\r\n        else {\r\n            ports[node.id].push(makePort(node.id, 'output', 1))\r\n        }\r\n\r\n        ports[node.id].push(makePort(node.id, 'input', 0))\r\n\r\n    })\r\n\r\n    return ports\r\n}\r\n\r\n\r\nfunction makePort(id, type, index, sideIndex?) {\r\n    let portid = `${id}_${type === 'input' ? 'in' : 'out'}`\r\n    const side = type === 'input' ? 'NORTH' : 'SOUTH'\r\n\r\n    if (typeof sideIndex !== 'undefined') {\r\n        portid += '_' + sideIndex\r\n    }\r\n\r\n    return {\r\n        height: 2,\r\n        width: 2,\r\n        id: portid,\r\n        type,\r\n        layoutOptions: {\r\n            'port.index': index,\r\n            'port.side': side,\r\n        },\r\n    }\r\n}\r\n\r\n\r\nfunction getNodes(idsChain, operationsMap, operationsPartitions, ports, operationsByNextOperation) {\r\n    const nodes = []\r\n\r\n    idsChain.forEach((id, index) => {\r\n        const operation = operationsMap.get(id)\r\n\r\n        const node = {\r\n            id: id,\r\n            width: 285,\r\n            height: 70 + (operation.guardFunction?.length ? 24 : 0),\r\n            layoutOptions: {\r\n                'partitioning.partition': operationsPartitions[id],\r\n                // 'nodeLabels.placement': '[H_LEFT, V_TOP, OUTSIDE]',\r\n                // 'portAlignment.east': 'CENTER',\r\n                portConstraints: 'FIXED_ORDER',\r\n                // 'portAlignment.default': 'CENTER',\r\n            },\r\n            ports: ports[id],\r\n            meta: {\r\n                type: operation.type,\r\n                operation: operation.id,\r\n                prevOperation: operationsByNextOperation[id]?.id,\r\n                nextOperation: operation.nextOperationId,\r\n            },\r\n        }\r\n\r\n        if (operation.type === 'start') {\r\n            node.width = 40\r\n            node.height = 40\r\n        }\r\n\r\n        if (operation.type === 'conditionLabel') {\r\n            const parentOperation = operationsMap.get(operation.parentOperationId)\r\n            node.layoutOptions['partitioning.partition'] = operationsPartitions[parentOperation.id] + 1\r\n            node.width = 230\r\n            node.height = 1\r\n            if (parentOperation.conditionsType === 'switch') {\r\n                node.meta.condition = parentOperation.conditions[0].cases[operation.port]\r\n            }\r\n            else {\r\n                node.meta.condition = parentOperation.conditions[operation.port]\r\n            }\r\n            node.meta.conditionsType = parentOperation.conditionsType\r\n            node.meta.conditionN = operation.port\r\n        }\r\n\r\n\r\n        if (operation.type === 'condition') {\r\n            node.layoutOptions['elk.spacing.nodeNode'] = 0\r\n        }\r\n\r\n        nodes.push(node)\r\n\r\n    })\r\n\r\n    return nodes\r\n}\r\n\r\nfunction getConditionLabelsOperations(operations) {\r\n    const labelsOperations = []\r\n\r\n    operations.filter(o => o.type === 'condition').forEach(node => {\r\n        const conds = node.conditionsType === 'switch' ? node.conditions[0].cases : node.conditions\r\n        conds.forEach((condition, i) => {\r\n            if (condition.operationId) {\r\n                labelsOperations.push({\r\n                    id: `${node.id}-label-${i}`,\r\n                    type: 'conditionLabel',\r\n                    parentOperationId: node.id,\r\n                    nextOperationId: condition.operationId,\r\n                    port: i,\r\n                })\r\n            }\r\n        })\r\n    })\r\n\r\n    return labelsOperations\r\n}\r\n\r\n\r\n//Math.random().toString(32).slice(2)\r\n\r\nfunction getEdges(idsChain, operationsMap) {\r\n    const operations = idsChain.map(id => operationsMap.get(id))\r\n\r\n    const edges = []\r\n\r\n    operations.forEach(node => {\r\n        if (node.type === 'condition') {\r\n            const conds = node.conditionsType === 'switch' ? node.conditions[0].cases : node.conditions\r\n            conds.forEach((condition, i) => {\r\n                if (condition.operationId) {\r\n                    edges.push([node.id, `${node.id}-label-${i}`, i])\r\n                }\r\n            })\r\n        }\r\n        else if (node.nextOperationId) {\r\n            edges.push([node.id, node.nextOperationId])\r\n        }\r\n    })\r\n\r\n    return edges\r\n}\r\n\r\nfunction makeEdges(operationsEdges, nodes) {\r\n    const nodesById = nodes\r\n        .reduce((acc, node) => ({\r\n            ...acc,\r\n            [node.id]: node\r\n        }), {})\r\n\r\n    const edges = operationsEdges.map(([id, nextOperationId, outIndex, inIndex]) => {\r\n        // const operation = operationsMap.get(id)\r\n        // const nextOperation = operationsMap.get(nextOperationId)\r\n\r\n        // console.log('.>edges', operation)\r\n\r\n        return {\r\n            id: `${id}_${nextOperationId}`,\r\n            source: id,\r\n            sourcePort: `${id}_out${typeof outIndex !== 'undefined' ? `_${outIndex}` : ''}`,\r\n            target: nextOperationId,\r\n            targetPort: `${nextOperationId}_in${typeof inIndex !== 'undefined' ? `_${inIndex}` : ''}`,\r\n            sourceNode: nodesById[id],\r\n            targetNode: nodesById[nextOperationId],\r\n        }\r\n    })\r\n\r\n    return edges\r\n}\r\n\r\n\r\nexport function parseDto(data) {\r\n    console.log('dd', data)\r\n\r\n    const executors = data.dtos.executors\r\n    const parsedExecutors = {}\r\n\r\n\r\n\r\n    Object.entries(executors).forEach(([execName, executor]) => {\r\n        parsedExecutors[execName] = {}\r\n\r\n        executor.forEach((executorElement) => {\r\n            const adapter = executorElement.$adapter || 'default'\r\n\r\n            if (typeof parsedExecutors[execName][adapter] === 'undefined') {\r\n                parsedExecutors[execName][adapter] = {}\r\n            }\r\n\r\n            if (executorElement.command?.value) {\r\n                if (typeof parsedExecutors[execName][adapter].commands === 'undefined') {\r\n                    parsedExecutors[execName][adapter].commands = {}\r\n                }\r\n                if (typeof parsedExecutors[execName][adapter].commands[executorElement.command.value] === 'undefined') {\r\n                    parsedExecutors[execName][adapter].commands[executorElement.command.value] = {}\r\n                }\r\n                parsedExecutors[execName][adapter].commands[executorElement.command.value].props = executorElement\r\n            }\r\n            else {\r\n                parsedExecutors[execName][adapter].props = executorElement\r\n            }\r\n\r\n            delete executorElement['$adapter']\r\n        })\r\n    })\r\n\r\n    console.log('parsedExecutors', parsedExecutors)\r\n    this.dtos = parsedExecutors\r\n    return parsedExecutors\r\n}\r\n\r\n\r\n\r\n\r\n// function sortOperationsIds(operations) {\r\n//     const orderedIds = []\r\n//     const visitedIds = new Set()\r\n\r\n//     for (const object of operations) {\r\n//         if (!visitedIds.has(object.id)) {\r\n//             const currentChain = []\r\n//             let currentId = object.id\r\n\r\n//             while (currentId && currentId !== '') {\r\n//                 currentChain.push(currentId)\r\n//                 visitedIds.add(currentId)\r\n//                 const nextObject = operations.find(o => o.id === currentId)\r\n//                 currentId = nextObject?.nextOperationId\r\n//             }\r\n\r\n//             orderedIds.push(currentChain)\r\n//         }\r\n//     }\r\n\r\n//     return orderedIds\r\n\r\n// }\r\n\r\n// function getDiagramsData(operations) {\r\n//     const groupedIds = getGroups(operations)\r\n//     console.log('groupedIds', groupedIds)\r\n//     const operationsMap = operations.reduce((acc, op) => ({ ...acc, [op.id]: op }), {})\r\n\r\n//     return groupedIds.map(idsChain => getElkConfig(idsChain, operationsMap))\r\n// }\r\n\r\n// export function as(operations) {\r\n//     return operations.map(o => ({\r\n//         id: `${o.id}_${o.nextOperationId}`,\r\n//         source: o.id,\r\n//         sourcePort: o.id + '_out',\r\n//         target: o.nextOperationId,\r\n//         targetPort: o.nextOperationId + '_in',\r\n//         operation: o,\r\n//     })).filter(edge => edge.target?.length)\r\n// }\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n// function getStartOperations(query) {\r\n//     const queryState = query\r\n//     const hasStart = queryState.start\r\n\r\n//     const startOperations = []\r\n\r\n//     console.log('getStartOperations', queryState)\r\n\r\n//     if (queryState.start) {\r\n//         Object.entries(queryState.start).forEach(([key, nextOperationId]) => {\r\n//             startOperations.push({\r\n//                 id: '_start_op_' + key,\r\n//                 type: 'start',\r\n//                 nextOperationId,\r\n//             })\r\n//         })\r\n//     }\r\n//     else {\r\n//         console.log('**', queryState.operations[0])\r\n//         const firstOp = queryState.operations[0]\r\n//         startOperations.push({\r\n//             id: '_start_op_',\r\n//             type: 'start',\r\n//             nextOperationId: firstOp.id,\r\n//         })\r\n//     }\r\n\r\n\r\n//     return startOperations\r\n\r\n// }\r\n\r\n// function getEndOperations(query) {\r\n//     const queryState = query\r\n//     const hasStart = queryState.start\r\n\r\n//     const startOperations = []\r\n\r\n//     if (queryState.start) {\r\n//         Object.entries(queryState.start).forEach(([key, nextOperationId]) => {\r\n//             startOperations.push({\r\n//                 id: '_start_op_' + key,\r\n//                 type: 'start',\r\n//                 nextOperationId,\r\n//             })\r\n//         })\r\n//     }\r\n//     else {\r\n//         const firstOp = queryState.operations[0]\r\n//         startOperations.push({\r\n//             id: '_start_op_',\r\n//             type: 'start',\r\n//             nextOperationId: firstOp.id,\r\n//         })\r\n//     }\r\n\r\n\r\n//     return startOperations\r\n// }\r\n\r\n// export function addNode(type, node, port) {\r\n//     console.log('add', type, node, port)\r\n// }\r\n\r\n// function insertNode(model, node, edge) {\r\n\r\n// }\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n// function generateUniqueOperationId(operations) {\r\n//     const allIds = operations.map(o => o.id)\r\n//     let id\r\n//     do {\r\n//         id = generateId()\r\n//     }\r\n//     while (allIds.includes(id))\r\n\r\n//     return id\r\n// }\r\n\r\n// function generateId(): string {\r\n//     const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'\r\n//     const letter = alphabet[Math.floor(Math.random() * alphabet.length)]\r\n//     const digits = Math.floor(Math.random() * 100).toString().padStart(2, '0')\r\n//     return `${letter}${digits}`\r\n// }\r\n"
+const strangeText = okText + okText + okText + okText
 
 async function initDb() {
     const database = createRxDatabase({
@@ -23,32 +50,38 @@ async function initDb() {
                     type: 'module',
                 }
             }
-        )
+        ),
+        password: {
+            algorithm: 'AES-CTR',
+            password: 'myLongPassword',
+        },
     });
 
-    console.log('database1 promise', database);
     const db = await database;
-    console.log('database1', db);
+    return db
 }
 
-initDb();
+initDb().then(async db => {
+    console.log('Database created');
 
-async function initDb2() {
-    const database = createRxDatabase({
-        name: 'mydatabase2',
-        storage: getRxStorageSharedWorker(
-            {
-                workerInput: IdbWorkerUrl,
-                workerOptions: {
-                    type: 'module',
-                }
+    await db.addCollections({
+        xyz: {
+            schema
+        }
+    })
+
+    db.xyz.bulkInsert([
+        {
+            id: '1',
+            d: {
+                name: 'Alice',
+                age: 25,
+                text: strangeText,
             }
-        )
-    });
+        },
+    ])
 
-    console.log('database2 promise', database);
-    const db = await database;
-    console.log('database2', db);
-}
 
-initDb2();
+}).catch(err => {
+    console.error('Error', err);
+})
